@@ -1,0 +1,194 @@
+/*
+Function Name: convertFolderOfPDFToText
+
+Description: This function takes a folder ID containing PDF files and converts them to text using OCR (Optical Character Recognition). The extracted text is then used to extract specific information from the PDFs and store them in a Google Spreadsheet.
+
+Parameters:
+
+folderId (optional): A string representing the ID of the Google Drive folder containing the PDF files to be converted. If not provided, a default folder ID is used.
+language (optional): A string representing the language of the text in the PDFs. If not provided, English is used.
+Return Value: None.
+
+Function Steps:
+
+The function starts by setting default values for the folder ID and language parameters if they are not provided.
+
+The function retrieves the Google Drive folder with the provided ID.
+
+The function retrieves all PDF files in the folder.
+
+The function retrieves the Google Spreadsheet where the extracted information will be stored.
+
+The function retrieves the list of PDF files that have already been processed and stored in the spreadsheet.
+
+The function acquires a script lock to prevent multiple instances of the function from running at the same time.
+
+The function loops through all PDF files in the folder and processes each file that has not already been processed.
+
+For each unprocessed file, the function creates a new Google Drive file with the same name as the PDF file and uploads the PDF content to it using the Google Drive API.
+
+The function then uses OCR to extract text from the uploaded PDF file, based on the specified language.
+
+The function then deletes the uploaded PDF file, as it is no longer needed.
+
+The function extracts specific information from the PDF text using a custom function called "extractInformationFromPDFText".
+
+The function then stores the extracted information in the Google Spreadsheet.
+
+Finally, the function releases the script lock.
+
+Note: This function relies on the Google Drive API and Google Sheets API, so the necessary authorization scopes need to be granted before running the function. Also, the custom function "extractInformationFromPDFText" is not defined in the provided code, so it is assumed that it is defined elsewhere.
+
+The function 'extractInformationFromPDFText' takes a string of text extracted from a PDF file and extracts relevant information from it. The extracted information includes corporate ID, account number, primary number, bill number, billing period, due date, subtotal, VAT, total, and difference. The extracted information is returned in an object.
+
+Parameters:
+
+textContent: A string representing the text content of a PDF file.
+Return value:
+
+An object with properties for corporate ID, account number, primary number, bill number, billing period, due date, subtotal, VAT, total, and difference.
+Implementation details:
+
+The function uses regular expressions to search for patterns in the text content that correspond to the relevant information.
+The regular expressions are defined as variables at the beginning of the function.
+The function uses the match method of the String object to search for matches to the regular expressions.
+If a match is found, the corresponding information is extracted from the match and assigned to a property of the object to be returned.
+If a match is not found, the corresponding property is assigned a value of null.
+The function calculates the difference between the total and a fixed value of 399, and returns it as a property of the object, rounded to 2 decimal places.
+
+*/
+
+/**
+ * Convert all PDF files in a folder to text using OCR and extract information using a regular expression pattern.
+ * The extracted information is then stored in a Google Sheets spreadsheet.
+ *
+ * @param {string} folderId - The ID of the folder containing the PDF files to convert.
+ * @param {string} language - The language to use for OCR. Defaults to 'en' for English.
+ */
+const convertFolderOfPDFToText = (folderId, language) => {
+  // Set default values for function parameters
+  folderId = folderId || '<<GoogleDriveFolderID>>'; // replace with the folder ID containing the PDF files (eg. 1zB454EJ546E2JXK8prXyD7ype4564OFryo) 
+  language = language || 'en'; // English
+
+  // Get the folder by ID
+  const folder = DriveApp.getFolderById(folderId);
+  // Get all PDF files in the folder
+  const files = folder.getFilesByType('application/pdf');
+
+  // Set up the destination spreadsheet
+  const spreadsheetId = "<<GoogleSpreadsheetID>>";
+  const sheetName = '<<SheetName>>';
+  const sheet = SpreadsheetApp.openById(spreadsheetId).getSheetByName(sheetName);
+
+  // Get the list of filenames that have already been processed
+  const processedFiles = sheet
+    .getDataRange()
+    .getValues()
+    .slice(1) // exclude header row
+    .map(row => row[10]); // filename is in the 10th column
+
+  // Acquire a script lock to prevent multiple instances of the script from running at the same time
+  const lock = LockService.getScriptLock();
+  try {
+    if (lock.tryLock(10000)) { // wait up to 10 seconds to acquire the lock
+      while (files.hasNext()) {
+        const pdfBlob = files.next();
+        const fileName = pdfBlob.getName().replace(/\.pdf$/, '');
+
+        if (processedFiles.includes(fileName)) {
+          // Skip files that have already been processed
+          //console.log(`Skipping ${fileName} - already processed`);
+          continue;
+        }
+
+        // Insert the PDF file into Google Drive and apply OCR
+        const { id } = Drive.Files.insert(
+          {
+            title: fileName,
+            mimeType: pdfBlob.getBlob().getContentType(),
+          },
+          pdfBlob,
+          {
+            ocr: true,
+            ocrLanguage: language,
+            fields: 'id,title',
+          }
+        );
+
+        // Extract text content from the OCR result
+        const textContent = DocumentApp.openById(id).getBody().getText();
+        // Delete the temporary PDF file
+        DriveApp.getFileById(id).setTrashed(true);
+
+        // Extract information from the text content using regular expression patterns
+        const extractedInfo = extractInformationFromPDFText(textContent, fileName);
+        const { corporateId, accountNumber, primaryNumber, billno, billingPeriod, dueDate, subtotal, vat, total, difference } = extractedInfo;
+
+        // Write the extracted information to the destination spreadsheet
+        if (sheet.getLastRow() === 0) {
+          sheet.appendRow(['corp-id', 'acc-no', 'prim-no', 'bill-no.', 'bill-period', 'due-date', 'subtotal', 'vat', 'total', 'Difference (Formula : total-399)', 'filename']);
+        }
+
+        // Appends the extracted information from the PDF to a Google Sheet
+        // with headers and values in separate rows
+        sheet.appendRow([corporateId, accountNumber, primaryNumber, billno, billingPeriod, dueDate, subtotal, vat, total, difference, fileName]);
+
+        // Forces the sheet to write all pending changes to the sheet
+        SpreadsheetApp.flush();
+      }
+    } else {
+      throw new Error('Could not obtain lock, another instance of the script is running.');
+    }
+  } finally {
+
+    // Releases the lock obtained earlier in the script
+    lock.releaseLock();
+  }
+};
+
+
+/**
+ * This function extracts relevant information from a given PDF text content.
+ * It uses regular expressions to extract information such as corporate ID, account number, billing period, and total amount.
+ * @param {string} textContent - The text content of a PDF document.
+ * @returns {object} An object containing the extracted information.
+ */
+const extractInformationFromPDFText = (textContent) => {
+  // Define regular expressions to match patterns in the PDF text content
+  const corporateIdPattern = /ABCD\d{6}/;
+  const accountNumberPattern = /ABCD\d{6}(\d{10})/;
+  const primaryNumberPattern = /\d{10}(?=Php)/;
+  const billNumberPattern = /Bill no. (\d+)/;
+  const billingPeriodPattern = /(\d{2}\/\d{2}\/\d{2})\s+to(\d{2}\/\d{2}\/\d{2})(\d{2}\/\d{2}\/\d{2})(?!\d)/;
+  const subtotalPattern = /Subtotal Php (\d+\.\d+)/;
+  const vatPattern = /ADD % VAT \(Value Added Tax\) Php (\d+\.\d+)/;
+  const totalPattern = /Total Php (\d+\.\d+)/;
+
+  // Use regular expressions to extract relevant information from the PDF text content
+  const corporateIdMatch = textContent.match(corporateIdPattern);
+  const accountNumberMatch = textContent.match(accountNumberPattern);
+  const primaryNumberMatch = textContent.match(primaryNumberPattern);
+  const billNumberMatch = textContent.match(billNumberPattern);
+  const billingPeriodMatch = textContent.match(billingPeriodPattern);
+  const subtotalMatch = textContent.match(subtotalPattern);
+  const vatMatch = textContent.match(vatPattern);
+  const totalMatch = textContent.match(totalPattern);
+
+  // Assign the extracted information to variables, or null if no match is found
+  const corporateId = corporateIdMatch ? corporateIdMatch[0] : null;
+  const accountNumber = accountNumberMatch ? accountNumberMatch[1] : null;
+  const primaryNumber = primaryNumberMatch ? primaryNumberMatch[0] : null;
+  const billno = billNumberMatch ? billNumberMatch[1] : null;
+  const billingPeriod = billingPeriodMatch ? `${billingPeriodMatch[1]} to ${billingPeriodMatch[2]}` : null;
+  const dueDate = billingPeriodMatch ? billingPeriodMatch[3] : null;
+  const subtotal = subtotalMatch ? subtotalMatch[1] : null;
+  const vat = vatMatch ? vatMatch[1] : null;
+  const total = totalMatch ? totalMatch[1] : null;
+  const totaldifference = total ? total - 399 : null;
+  const difference = totaldifference !== null ? totaldifference.toFixed(2) : null;
+
+  // Return an object containing the extracted information
+  return { corporateId, accountNumber, primaryNumber, billno, billingPeriod, dueDate, subtotal, vat, total, difference };
+};
+
+  
